@@ -26,10 +26,18 @@ pub const fn asset_name_parts(install_kind: InstallKind) -> (&'static str, &'sta
 /// The tar.gz lands next to the current executable so the extraction script can overwrite it in
 /// place. The AppImage lands in the system temp directory; it only replaces the running AppImage
 /// once its signature is verified.
+///
+/// For [`InstallKind::Installer`] this also checks that the app is actually running from an
+/// AppImage, so a misconfigured build fails before spending a download on an update it can never
+/// apply, rather than after.
 #[cfg(target_os = "linux")]
 pub fn download_dir(config: &UpdaterConfig) -> Result<PathBuf, UpdateError> {
 	match config.install_kind {
-		InstallKind::Installer => Ok(env::temp_dir()),
+		InstallKind::Installer => {
+			env::var("APPIMAGE")
+				.map_err(|_| UpdateError::Io("Not running from an AppImage; cannot self-update.".to_string()))?;
+			Ok(env::temp_dir())
+		}
 		InstallKind::Portable => env::current_exe()
 			.map_err(|e| UpdateError::Io(format!("Failed to determine exe path: {e}")))?
 			.parent()
@@ -78,8 +86,12 @@ fn wait_clause(pid: u32) -> String {
 }
 
 fn installer_script(pid: u32, new_appimage: &str, current_appimage: &str) -> String {
+	// `;` rather than `&&` between steps, like the Windows scripts: if `chmod`/`mv` fails (for
+	// example the AppImage lives somewhere the user can't write), the old AppImage is still
+	// there under `current_appimage` and still gets relaunched, instead of leaving the app
+	// closed with no indication why.
 	format!(
-		"{wait}; chmod +x {new_q} && mv -f {new_q} {cur_q} && nohup {cur_q} >/dev/null 2>&1 &",
+		"{wait}; chmod +x {new_q}; mv -f {new_q} {cur_q}; nohup {cur_q} >/dev/null 2>&1 &",
 		wait = wait_clause(pid),
 		new_q = sh_quote(new_appimage),
 		cur_q = sh_quote(current_appimage),
@@ -87,8 +99,10 @@ fn installer_script(pid: u32, new_appimage: &str, current_appimage: &str) -> Str
 }
 
 fn targz_update_script(pid: u32, targz: &str, dest_dir: &str, current_exe: &str) -> String {
+	// See `installer_script`: `;` so a failed extraction still relaunches the existing exe
+	// rather than leaving the app closed.
 	format!(
-		"{wait}; tar -xzf {targz_q} -C {dest_q} && rm -f {targz_q} && nohup {exe_q} >/dev/null 2>&1 &",
+		"{wait}; tar -xzf {targz_q} -C {dest_q}; rm -f {targz_q}; nohup {exe_q} >/dev/null 2>&1 &",
 		wait = wait_clause(pid),
 		targz_q = sh_quote(targz),
 		dest_q = sh_quote(dest_dir),
@@ -121,8 +135,14 @@ mod tests {
 		let script = installer_script(42, "/tmp/app.AppImage", "/home/user/App.AppImage");
 		assert_eq!(
 			script,
-			"sleep 1; while kill -0 42 2>/dev/null; do sleep 0.2; done; chmod +x '/tmp/app.AppImage' && mv -f '/tmp/app.AppImage' '/home/user/App.AppImage' && nohup '/home/user/App.AppImage' >/dev/null 2>&1 &"
+			"sleep 1; while kill -0 42 2>/dev/null; do sleep 0.2; done; chmod +x '/tmp/app.AppImage'; mv -f '/tmp/app.AppImage' '/home/user/App.AppImage'; nohup '/home/user/App.AppImage' >/dev/null 2>&1 &"
 		);
+	}
+
+	#[test]
+	fn installer_script_uses_semicolons_so_a_failed_step_still_relaunches() {
+		let script = installer_script(1, "/tmp/app.AppImage", "/opt/App.AppImage");
+		assert!(!script.contains("&&"));
 	}
 
 	#[test]
@@ -130,8 +150,14 @@ mod tests {
 		let script = targz_update_script(7, "/tmp/app.tar.gz", "/opt/app", "/opt/app/app");
 		assert_eq!(
 			script,
-			"sleep 1; while kill -0 7 2>/dev/null; do sleep 0.2; done; tar -xzf '/tmp/app.tar.gz' -C '/opt/app' && rm -f '/tmp/app.tar.gz' && nohup '/opt/app/app' >/dev/null 2>&1 &"
+			"sleep 1; while kill -0 7 2>/dev/null; do sleep 0.2; done; tar -xzf '/tmp/app.tar.gz' -C '/opt/app'; rm -f '/tmp/app.tar.gz'; nohup '/opt/app/app' >/dev/null 2>&1 &"
 		);
+	}
+
+	#[test]
+	fn targz_script_uses_semicolons_so_a_failed_step_still_relaunches() {
+		let script = targz_update_script(1, "/tmp/app.tar.gz", "/opt/app", "/opt/app/app");
+		assert!(!script.contains("&&"));
 	}
 
 	#[test]
