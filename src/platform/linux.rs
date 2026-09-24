@@ -1,6 +1,6 @@
 #[cfg(target_os = "linux")]
 use std::{
-	env,
+	env, fs,
 	path::{Path, PathBuf},
 	process::{self, Command},
 };
@@ -24,8 +24,10 @@ pub const fn asset_name_parts(install_kind: InstallKind) -> (&'static str, &'sta
 }
 
 /// The tar.gz lands next to the current executable so the extraction script can overwrite it in
-/// place. The `AppImage` lands in the system temp directory; it only replaces the running
-/// `AppImage` once its signature is verified.
+/// place. The `AppImage` lands in a per-user cache directory rather than the shared system temp
+/// directory, since a predictable path under `/tmp` could be squatted by another local user and
+/// break the update for everyone else; it only replaces the running `AppImage` once its signature
+/// is verified.
 ///
 /// For [`InstallKind::Installer`] this also checks that the app is actually running from an
 /// `AppImage`, so a misconfigured build fails before spending a download on an update it can
@@ -36,7 +38,7 @@ pub fn download_dir(config: &UpdaterConfig) -> Result<PathBuf, UpdateError> {
 		InstallKind::Installer => {
 			env::var("APPIMAGE")
 				.map_err(|_| UpdateError::Io("Not running from an AppImage; cannot self-update.".to_string()))?;
-			Ok(env::temp_dir())
+			cache_dir(config)
 		}
 		InstallKind::Portable => env::current_exe()
 			.map_err(|e| UpdateError::Io(format!("Failed to determine exe path: {e}")))?
@@ -44,6 +46,21 @@ pub fn download_dir(config: &UpdaterConfig) -> Result<PathBuf, UpdateError> {
 			.map(Path::to_path_buf)
 			.ok_or_else(|| UpdateError::Io("Failed to get exe directory".to_string())),
 	}
+}
+
+/// A per-user cache directory (`$XDG_CACHE_HOME/{app_name}`, falling back to
+/// `$HOME/.cache/{app_name}`) for the downloaded `AppImage`, created if it doesn't exist yet.
+#[cfg(target_os = "linux")]
+fn cache_dir(config: &UpdaterConfig) -> Result<PathBuf, UpdateError> {
+	let base = env::var_os("XDG_CACHE_HOME")
+		.map(PathBuf::from)
+		.or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+		.ok_or_else(|| {
+			UpdateError::Io("Could not determine a cache directory: neither XDG_CACHE_HOME nor HOME is set".to_string())
+		})?;
+	let dir = base.join(&config.app_name);
+	fs::create_dir_all(&dir).map_err(|e| UpdateError::Io(format!("Failed to create cache directory: {e}")))?;
+	Ok(dir)
 }
 
 /// Start a detached shell script that waits for this process to exit, applies the update, and
@@ -118,6 +135,21 @@ mod tests {
 	fn asset_name_depends_on_install_kind() {
 		assert_eq!(asset_name_parts(InstallKind::Installer), ("", "AppImage"));
 		assert_eq!(asset_name_parts(InstallKind::Portable), ("", "tar.gz"));
+	}
+
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn cache_dir_prefers_xdg_cache_home_and_creates_it() {
+		let temp = env::temp_dir().join("ship-shape-cache-dir-test");
+		// SAFETY: no other test in this crate reads or writes XDG_CACHE_HOME.
+		unsafe { env::set_var("XDG_CACHE_HOME", &temp) };
+		let config = UpdaterConfig::new("o/r", "myapp", "My App", "key", "1.0.0");
+		let dir = cache_dir(&config).unwrap();
+		assert_eq!(dir, temp.join("myapp"));
+		assert!(dir.is_dir());
+		// SAFETY: see above.
+		unsafe { env::remove_var("XDG_CACHE_HOME") };
+		let _ = fs::remove_dir_all(&temp);
 	}
 
 	#[test]
