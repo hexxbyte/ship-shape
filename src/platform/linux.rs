@@ -24,12 +24,12 @@ pub const fn asset_name_parts(install_kind: InstallKind) -> (&'static str, &'sta
 }
 
 /// The tar.gz lands next to the current executable so the extraction script can overwrite it in
-/// place. The AppImage lands in the system temp directory; it only replaces the running AppImage
-/// once its signature is verified.
+/// place. The `AppImage` lands in the system temp directory; it only replaces the running
+/// `AppImage` once its signature is verified.
 ///
 /// For [`InstallKind::Installer`] this also checks that the app is actually running from an
-/// AppImage, so a misconfigured build fails before spending a download on an update it can never
-/// apply, rather than after.
+/// `AppImage`, so a misconfigured build fails before spending a download on an update it can
+/// never apply, rather than after.
 #[cfg(target_os = "linux")]
 pub fn download_dir(config: &UpdaterConfig) -> Result<PathBuf, UpdateError> {
 	match config.install_kind {
