@@ -1,6 +1,6 @@
 [package]
 name = "ship-shape"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Universal auto-updater for wxDragon desktop apps"
 license = "MIT"
@@ -19,3 +19,9 @@ pulldown-cmark = { version = "0.13.4", default-features = false }
 serde = { version = "1.0.229", default-features = false, features = ["derive"] }
 ureq = { version = "3.4.2", default-features = false, features = ["json", "rustls"] }
 wxdragon = "0.9.22"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }

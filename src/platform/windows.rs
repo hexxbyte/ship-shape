@@ -2,7 +2,7 @@
 use std::{
 	env,
 	os::windows::process::CommandExt,
-	path::Path,
+	path::{Path, PathBuf},
 	process::{self, Command},
 };
 
@@ -10,17 +10,62 @@ use std::{
 use patois::t;
 
 #[cfg(target_os = "windows")]
-use crate::UpdaterConfig;
+use super::InstallOutcome;
+use crate::InstallKind;
+#[cfg(target_os = "windows")]
+use crate::{UpdateError, UpdaterConfig};
 
 #[cfg(target_os = "windows")]
-use super::{ParentWindow, show_error};
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-#[cfg(any(target_os = "windows", test))]
+pub const fn asset_name_parts(install_kind: InstallKind) -> (&'static str, &'static str) {
+	match install_kind {
+		InstallKind::Installer => ("_setup", "exe"),
+		InstallKind::Portable => ("", "zip"),
+	}
+}
+
+/// Portable zips land next to the current executable so that the extraction script can overwrite
+/// in place. Installers land in the system temp directory.
+#[cfg(target_os = "windows")]
+pub fn download_dir(config: &UpdaterConfig) -> Result<PathBuf, UpdateError> {
+	match config.install_kind {
+		InstallKind::Installer => Ok(env::temp_dir()),
+		InstallKind::Portable => env::current_exe()
+			.map_err(|e| UpdateError::Io(format!("Failed to determine exe path: {e}")))?
+			.parent()
+			.map(Path::to_path_buf)
+			.ok_or_else(|| UpdateError::Io("Failed to get exe directory".to_string())),
+	}
+}
+
+/// Start a hidden PowerShell script that waits for this process to exit, applies the update,
+/// and relaunches the app.
+#[cfg(target_os = "windows")]
+pub fn install(config: &UpdaterConfig, path: &Path) -> Result<InstallOutcome, String> {
+	let current_exe = env::current_exe().map_err(|e| format!("{}: {e}", t("Failed to get current exe path")))?;
+	let update = path.display().to_string();
+	let exe = current_exe.display().to_string();
+	let script = match config.install_kind {
+		InstallKind::Installer => installer_script(process::id(), &config.installer_args, &update, &exe),
+		InstallKind::Portable => {
+			let exe_dir = current_exe.parent().unwrap_or(&current_exe);
+			zip_update_script(process::id(), &update, &exe_dir.display().to_string(), &exe)
+		}
+	};
+	Command::new("powershell.exe")
+		.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"])
+		.arg(&script)
+		.creation_flags(CREATE_NO_WINDOW)
+		.spawn()
+		.map_err(|e| format!("{}: {e}", t("Failed to launch update script")))?;
+	Ok(InstallOutcome::Exit)
+}
+
 fn ps_quote(s: &str) -> String {
 	format!("'{}'", s.replace('\'', "''"))
 }
 
-#[cfg(any(target_os = "windows", test))]
 fn installer_script(pid: u32, installer_args: &[String], installer: &str, current_exe: &str) -> String {
 	let arg_clause = if installer_args.is_empty() {
 		String::new()
@@ -35,7 +80,6 @@ fn installer_script(pid: u32, installer_args: &[String], installer: &str, curren
 	)
 }
 
-#[cfg(any(target_os = "windows", test))]
 fn zip_update_script(pid: u32, zip: &str, dest_dir: &str, current_exe: &str) -> String {
 	format!(
 		"Start-Sleep -Seconds 1; Wait-Process -Id {pid} -ErrorAction SilentlyContinue; Expand-Archive -Path {zip_q} -DestinationPath {dest_q} -Force; Remove-Item -Path {zip_q} -Force; Start-Process {exe_q}",
@@ -45,71 +89,15 @@ fn zip_update_script(pid: u32, zip: &str, dest_dir: &str, current_exe: &str) -> 
 	)
 }
 
-#[cfg(target_os = "windows")]
-pub(super) fn install(
-	config: &UpdaterConfig,
-	parent: &ParentWindow,
-	path: &Path,
-	is_exe: bool,
-	is_zip: bool,
-	err_title: &str,
-) {
-	let current_exe = match env::current_exe() {
-		Ok(p) => p,
-		Err(e) => {
-			show_error(parent, err_title, &format!("{}: {e}", t("Failed to get current exe path")));
-			return;
-		}
-	};
-	if is_exe {
-		let script = installer_script(
-			process::id(),
-			&config.installer_args,
-			&path.display().to_string(),
-			&current_exe.display().to_string(),
-		);
-		if let Err(e) = Command::new("powershell.exe")
-			.arg("-NoProfile")
-			.arg("-ExecutionPolicy")
-			.arg("Bypass")
-			.arg("-Command")
-			.arg(&script)
-			.creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-			.spawn()
-		{
-			show_error(parent, err_title, &format!("{}: {e}", t("Failed to launch installer script")));
-			return;
-		}
-		process::exit(0);
-	} else if is_zip {
-		let exe_dir = current_exe.parent().unwrap_or(&current_exe);
-		let script = zip_update_script(
-			process::id(),
-			&path.display().to_string(),
-			&exe_dir.display().to_string(),
-			&current_exe.display().to_string(),
-		);
-		if let Err(e) = Command::new("powershell.exe")
-			.arg("-NoProfile")
-			.arg("-ExecutionPolicy")
-			.arg("Bypass")
-			.arg("-Command")
-			.arg(&script)
-			.creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-			.spawn()
-		{
-			show_error(parent, err_title, &format!("{}: {e}", t("Failed to launch update script")));
-			return;
-		}
-		process::exit(0);
-	} else {
-		show_error(parent, err_title, &t("Unknown update file format."));
-	}
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn asset_name_depends_on_install_kind() {
+		assert_eq!(asset_name_parts(InstallKind::Installer), ("_setup", "exe"));
+		assert_eq!(asset_name_parts(InstallKind::Portable), ("", "zip"));
+	}
 
 	#[test]
 	fn ps_quote_wraps_in_single_quotes() {

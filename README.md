@@ -11,39 +11,51 @@ Auto-updater library for wxDragon desktop apps, supporting Windows and macOS.
   - Windows: PowerShell install/extract scripts that relaunch the app afterward
   - macOS: downloads and mounts a signed, notarized `.dmg` for the user to drag into
     Applications; the app must be quit and relaunched manually
+  - Other platforms: downloads the file and tells the user where it is
 
-On macOS the expected release asset is `{app_name}.dmg` (`is_installer` is ignored there,
-since there's only one asset kind). Windows keeps the existing `{app_name}.zip` /
-`{app_name}_setup.exe` distinction.
+On macOS the expected release asset is `{app_name}.dmg` (`install_kind` is ignored there,
+since there's only one asset kind). Windows keeps the `{app_name}.zip` (`InstallKind::Portable`) /
+`{app_name}_setup.exe` (`InstallKind::Installer`) distinction.
+
+Each platform's asset names, download folder, and install flow live in one file under
+`src/platform/`. To add a platform, add a file there and select it in `src/platform.rs`.
 
 ## Usage
 
 ```toml
 [dependencies]
-ship-shape = "0.2.0"
+ship-shape = "0.3.0"
 ```
 
 ```rust
 use std::sync::Arc;
-use ship_shape::{UpdaterConfig, UpdateChannel, ui};
+use ship_shape::{InstallKind, UpdateChannel, UpdaterConfig, ui::{self, CheckTrigger}};
 
-let config = Arc::new(UpdaterConfig::new(
-    "owner/repo",
-    "myapp",
-    "My App",
-    "RWQ...minisign-public-key...",
-    format!("myapp/{}", env!("CARGO_PKG_VERSION")),
-));
-ui::run_update_check(
-    config,
-    frame.handle_ptr() as usize,
-    env!("CARGO_PKG_VERSION"),
-    env!("MY_APP_COMMIT_HASH"),
-    is_installer,
-    UpdateChannel::Stable,
-    false,
+let config = Arc::new(
+    UpdaterConfig::new(
+        "owner/repo",
+        "myapp",
+        "My App",
+        "RWQ...minisign-public-key...",
+        env!("CARGO_PKG_VERSION"),
+    )
+    .with_commit(env!("MY_APP_COMMIT_HASH"))
+    .with_install_kind(InstallKind::Portable),
 );
+ui::run_update_check(config, &frame, UpdateChannel::Stable, CheckTrigger::Manual);
 ```
+
+## Upgrading from 0.2
+
+- `UpdaterConfig::new` takes the current version instead of the user agent. The user agent
+  now defaults to `"{app_name}/{version}"`; override it with `with_user_agent`.
+- The commit hash and `is_installer` moved into the config: `with_commit` and
+  `with_install_kind`.
+- `check_for_updates(config, channel)` and
+  `ui::run_update_check(config, &frame, channel, trigger)` lost their other arguments.
+  `silent: true` is now `CheckTrigger::Automatic`.
+- `UpdateError` variants dropped their `Error` suffix (`HttpError` is now `Http(u16)`), gained
+  `Io`, and the enum is `#[non_exhaustive]`.
 
 ## License
 
